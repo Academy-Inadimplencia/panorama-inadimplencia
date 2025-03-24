@@ -68,7 +68,7 @@ def converter_tipos_dados(caminho_arquivo):
     
     return df
 
-arquivo_consolidado = r"C:\Users\WM328RC\OneDrive - EY\Panorama Inadimplência - Projeto Academy\Database\Database BCB\Ouro\Consolidado\consolidado_2020_a_2024.parquet"
+arquivo_consolidado = r"C:\Users\WM328RC\OneDrive - EY\Panorama Inadimplência - Projeto Academy\Database\Database BCB\Ouro\Consolidado\consolidado_2014_a_2019.parquet"
 
 # Executar a conversão diretamente (sem o bloco if _name_)
 df_convertido = converter_tipos_dados(arquivo_consolidado)
