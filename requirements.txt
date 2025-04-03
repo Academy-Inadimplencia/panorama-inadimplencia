@@ -1,3 +1,11 @@
 pandas
 gdown
 pyarrow
+streamlit
+langchain-openai
+langchain-core
+httpx
+numpy
+pillow
+pyodbc
+python-dotenv
