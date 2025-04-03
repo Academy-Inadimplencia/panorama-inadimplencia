@@ -1,4 +1,6 @@
-# V3 - Transformando o código em um dialogo com o usuário (Adicionando função de chat)
+# V4 - Adicionado streamlit para exibir o chatbot sem usar insights como base. apenas carregando os dados e exibindo o chatbot
+
+import streamlit as st
 from openai import OpenAI
 import httpx
 import pandas as pd
@@ -9,11 +11,20 @@ load_dotenv()
 
 api_key = os.getenv("API_KEY")
 
-client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com", http_client=httpx.Client(verify=False))
+st.set_page_config(page_title="Análise de Inadimplência", page_icon="💼")
 
-user_content = input("Como posso te ajudar hoje? ")
+@st.cache_resource
+def get_openai_client():
 
-df = pd.read_parquet(r"consolidado.parquet")
+    return OpenAI(
+        api_key= api_key, 
+        base_url="https://api.deepseek.com", 
+        http_client=httpx.Client(verify=False)
+    )
+
+@st.cache_data
+def load_data():
+    return pd.read_parquet(r"consolidado_amostra.parquet" ) 
 
 def generate_base_insights(df):
     
@@ -31,51 +42,76 @@ def generate_base_insights(df):
     
     return insights
 
-# Insights base para iniciar o contexto
-base_insights = generate_base_insights(df)
-
-# Lista para manter o histórico de mensagens
-messages = [
-    {"role": "system", "content": f"Você é um especialista no setor bancário especializado em análise de inadimplência no Brasil. Aqui estão alguns insights iniciais:\n{base_insights}"},
-]
-
-# Função principal do chat
-def chat_with_model():
-    print("Bem-vindo ao Chat de Análise de Inadimplência!")
-    print("Digite 'sair' para encerrar a conversa.")
+def main():
+   
+    st.title("💬 Chatbot Inadimplinha")
+    st.caption("🚀 Chatbot Inadimplinha desenvolvido por Grupo de Inadimplência EY")
     
-    while True:
-        # Entrada do usuário
-        user_input = input("\nVocê: ")
+    df = load_data()
+    base_insights = generate_base_insights(df)
+    if 'messages' not in st.session_state:
+        st.session_state.messages = [
+            {"role": "system", "content": f"Você é um especialista no setor bancário especializado em análise de inadimplência no Brasil. Aqui estão os dados a serem consultados:\n{base_insights}"},
+            {"role": "assistant", "content": "Como posso te ajudar hoje?"}
+        ]
+    
+ 
+    for message in st.session_state.messages[1:]:   
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    
+   
+    if prompt := st.chat_input("Faça uma pergunta sobre a inadimplência"):
+      
+        client = get_openai_client()
+        api_key = client.api_key
+        if not api_key:
+            st.info("Por favor, adicione sua chave de API para continuar.")
+            st.stop()
+  
+        st.session_state.messages.append({"role": "user", "content": prompt})
+     
         
-        # Opção de sair
-        if user_input.lower() == 'sair':
-            print("Encerrando o chat...")
-            break
+        with st.chat_message("user"):
+            st.markdown(prompt)
+         
         
-        # Adiciona a mensagem do usuário ao histórico
-        messages.append({"role": "user", "content": user_input})
-        
-        try:
-            # Envia a conversa para o modelo
-            response = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=messages,
-                stream=False
-            )
+      
+        with st.chat_message("assistant"):
+          
+            message_placeholder = st.empty()
+            full_response = ""  
             
-            # Obtém a resposta do modelo
-            model_response = response.choices[0].message.content
-            
-            # Imprime a resposta
-            print("\nAssistente:", model_response)
-            
-            # Adiciona a resposta do modelo ao histórico
-            messages.append({"role": "assistant", "content": model_response})
+            try:
+           
+                response = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=st.session_state.messages,
+                    stream=True   
+                )
         
-        except Exception as e:
-            print(f"Erro ao processar a solicitação: {e}")
+                for chunk in response:
+                    if chunk.choices[0].delta.content is not None:
+                        full_response += chunk.choices[0].delta.content
+                        message_placeholder.markdown(full_response + "▌")
 
-# Iniciar o chat
+                 
+                message_placeholder.markdown(full_response)
+
+            except Exception as e:
+                full_response = f"Erro: {str(e)}"  # Garantir que full_response tenha um valor
+                message_placeholder.markdown(full_response)
+            
+             
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+        
+  
+    with st.sidebar:
+        st.sidebar.header("EY Academy | Inadimplência")
+        st.sidebar.write(f"Número de registros: {len(df)}")
+        st.sidebar.write("Colunas disponíveis:")
+        st.sidebar.write(df.columns.tolist())
+
 if __name__ == "__main__":
-    chat_with_model()
+    main()
+  
