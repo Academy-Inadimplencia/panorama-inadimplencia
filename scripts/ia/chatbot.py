@@ -1,12 +1,17 @@
-# V5 - Implementação do langchain
+ # V7 - Eliminando base insights e passando contexto via endpoints e palavras-chave 
 import streamlit as st
 from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.chat_history import InMemoryChatMessageHistory
 import httpx
 import pandas as pd
 from PIL import Image
-import os
+import pyodbc
+import re
+import time
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
 
@@ -14,7 +19,12 @@ api_key = os.getenv("API_KEY")
  
 st.set_page_config(page_title="Análise de Inadimplência", page_icon="💼")
 
-@st.cache_resource
+if "app_initialized" not in st.session_state:
+    st.session_state.app_initialized = False
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+ 
 def get_llm_client():
     return ChatOpenAI(
         api_key=api_key,
@@ -23,250 +33,192 @@ def get_llm_client():
         http_client=httpx.Client(verify=False)
     )
 
-@st.cache_data
-def load_data():
-    return pd.read_csv(r"df_cons_agg.csv")
+# Conexão com o banco de dados
+def connect_to_db():
+    server = os.getenv('SERVER')
+    database = os.getenv('DATABASE')
+    username = os.getenv('USERNAME')
+    password = os.getenv('PASSWORD')
+    table = os.getenv('TABLE')
+    try:
+        connection_string = (
+            f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+            f"SERVER={server};"
+            f"DATABASE={database};"
+            f"UID={username};"
+            f"PWD={password};"
+            f"Encrypt=yes;"
+            f"TrustServerCertificate=no;"
+            f"Connection Timeout=30;"
+        )
+        conn = pyodbc.connect(connection_string)
+        return conn, table
+    except pyodbc.Error as e:
+        st.error(f"Erro ao conectar ao banco de dados: {str(e)}")
+        return None, None
 
-def generate_base_insights(df):
- 
-    numeric_columns = [
-        'carteira_inadimplida_arrastada', 
-        'carteira_ativa', 
-        'a_vencer_ate_90_dias', 
-        'ativo_problematico', 
-        'numero_de_operacoes'
-    ]
-
-    for col in numeric_columns:
-        df[col] = pd.to_numeric(
-            df[col].astype(str).str.replace(',', '.').str.replace('R$', '').str.replace(' ', ''), 
-            errors='coerce'
-        ).fillna(0)
-
-     df['regiao'] = df['uf'].map({
-        'AC': 'Norte', 'AM': 'Norte', 'AP': 'Norte', 'PA': 'Norte', 'RO': 'Norte', 'RR': 'Norte', 'TO': 'Norte',
-        'AL': 'Nordeste', 'BA': 'Nordeste', 'CE': 'Nordeste', 'MA': 'Nordeste', 'PB': 'Nordeste', 'PE': 'Nordeste', 'PI': 'Nordeste', 'RN': 'Nordeste', 'SE': 'Nordeste',
-        'GO': 'Centro-Oeste', 'MT': 'Centro-Oeste', 'MS': 'Centro-Oeste', 'DF': 'Centro-Oeste',
-        'SP': 'Sudeste', 'RJ': 'Sudeste', 'MG': 'Sudeste', 'ES': 'Sudeste',
-        'PR': 'Sul', 'RS': 'Sul', 'SC': 'Sul'
-    })
-    
-    # Preparar insights detalhados
-    insights = "Contexto Abrangente de Inadimplência:\n\n"
-    
-    # Filtrar por estado e somar a inadimplência
-    inadimplencia_por_estado = df.groupby('uf')['carteira_inadimplida_arrastada'].sum()
-
-    # Adicionar ao contexto de insights
-    insights += "\nTotal inadimplente por estado:\n"
-    for estado, valor in inadimplencia_por_estado.items():
-        insights += f"- {estado}: R$ {valor:,.2f}\n"
-
-    # 1. Mapa de Região e Inadimplência
-    regiao_inadimplencia = df.groupby('regiao')['carteira_inadimplida_arrastada'].sum().sort_values(ascending=False)
-    insights += "1. Panorama Regional de Inadimplência:\n"
-    for regiao, valor in regiao_inadimplencia.items():
-        percentual = (valor / df['carteira_inadimplida_arrastada'].sum()) * 100
-        insights += f"- {regiao}: R$ {valor:,.2f} ({percentual:.2f}% da inadimplência total)\n"
-    
-    # 2. Inadimplência por CNAE
-    cnae_inadimplencia = df.groupby('cnae_secao')['carteira_inadimplida_arrastada'].sum().sort_values(ascending=False)
-    insights += "\n2. Setores Econômicos e Inadimplência:\n"
-    for cnae, valor in cnae_inadimplencia.head(5).items():
-        percentual = (valor / df['carteira_inadimplida_arrastada'].sum()) * 100
-        insights += f"- {cnae}: R$ {valor:,.2f} ({percentual:.2f}% da inadimplência)\n"
-    
-    # 3. Comparativo PF vs PJ
-    df['tipo_cliente'] = df['cliente'].apply(lambda x: 'PF' if 'Física' in str(x) else 'PJ')
-    cliente_inadimplencia = df.groupby('tipo_cliente')['carteira_inadimplida_arrastada'].agg(['sum', 'mean'])
-    insights += "\n3. Comparativo Pessoa Física vs Pessoa Jurídica:\n"
-    for tipo, dados in cliente_inadimplencia.iterrows():
-        insights += f"- {tipo}: Total R$ {dados['sum']:,.2f}, Média R$ {dados['mean']:,.2f}\n"
-    
-    # 4. Modalidades por Tipo de Cliente
-    modalidade_cliente_inadimplencia = df.groupby(['tipo_cliente', 'modalidade'])['carteira_inadimplida_arrastada'].sum()
-    insights += "\n4. Modalidades de Inadimplência:\n"
-    for (tipo, modalidade), valor in modalidade_cliente_inadimplencia.sort_values(ascending=False).head(6).items():
-        insights += f"- {tipo} - {modalidade}: R$ {valor:,.2f}\n"
-    
-    # 5. Porte do Cliente
-    porte_inadimplencia = df.groupby(['tipo_cliente', 'porte'])['carteira_inadimplida_arrastada'].sum()
-    insights += "\n5. Inadimplência por Porte de Empresa:\n"
-    for (tipo, porte), valor in porte_inadimplencia.sort_values(ascending=False).head(6).items():
-        insights += f"- {tipo} - {porte}: R$ {valor:,.2f}\n"
-    
-    # 6. Previsão de Inadimplência em 90 dias
-    df['previsao_inadimplencia_90d'] = df['a_vencer_ate_90_dias'] * (df['carteira_inadimplida_arrastada'] / df['carteira_ativa'])
-    previsao_porte = df.groupby('porte')['previsao_inadimplencia_90d'].mean()
-    insights += "\n6. Previsão de Inadimplência em 90 dias por Porte:\n"
-    for porte, previsao in previsao_porte.items():
-        insights += f"- {porte}: R$ {previsao:,.2f}\n"
-    
-    # 7. Crescimento de Operações Inadimplentes
-    anos_operacoes = df.groupby('data_base').agg({
-        'numero_de_operacoes': 'sum',
-        'carteira_inadimplida_arrastada': 'sum'
-    })
-    insights += "\n7. Evolução de Operações Inadimplentes:\n"
-    for ano, dados in anos_operacoes.iterrows():
-        insights += f"- {ano}: {dados['numero_de_operacoes']} operações, R$ {dados['carteira_inadimplida_arrastada']:,.2f} inadimplidos\n"
-    
-    # 8. Inadimplência por Ocupação
-    ocupacao_inadimplencia = df[df['tipo_cliente'] == 'PF'].groupby('ocupacao')['carteira_inadimplida_arrastada'].sum()
-    insights += "\n8. Inadimplência por Ocupação (Pessoa Física):\n"
-    for ocupacao, valor in ocupacao_inadimplencia.sort_values(ascending=False).head(5).items():
-        insights += f"- {ocupacao}: R$ {valor:,.2f}\n"
-    
-    # 9. Projeção de Inadimplência Futura
-    insights += "\n9. Projeção Estratégica de Inadimplência:\n"
-    insights += "- Análise detalhada requer modelagem estatística avançada\n"
-    insights += "- Fatores-chave: porte do cliente, setor econômico, comportamento histórico\n"
-    
-    # 10. Indicador de Reestruturação
-    df['indicador_reestruturacao'] = df['ativo_problematico'] - df['carteira_inadimplida_arrastada']
-    reestruturacao_analise = df.groupby('porte')['indicador_reestruturacao'].mean()
-    insights += "\n10. Análise de Reestruturação:\n"
-    for porte, indicador in reestruturacao_analise.items():
-        insights += f"- {porte}: Indicador médio R$ {indicador:,.2f}\n"
-    
-    # Temas Adicionais de um Especialista em Inadimplência
-    insights += "\n11. Análises Estratégicas Adicionais:\n"
-    insights += "- Correlação entre modalidade de crédito e risco de inadimplência\n"
-    insights += "- Impacto de ciclos econômicos no comportamento de pagamento\n"
-    insights += "- Segmentação de clientes por perfil de risco\n"
-    insights += "- Estratégias de mitigação de inadimplência\n"
-    
-    # Contextualização Final
-    insights += "\nNOTA IMPORTANTE:\n"
-    insights += "- Estes insights são baseados em análise estatística descritiva\n"
-    insights += "- Recomenda-se análise aprofundada para decisões estratégicas\n"
-    insights += "- Variáveis externas podem impactar significativamente as projeções\n"
-    
-    # Análises Adicionais
-    insights += "\n12. Análises Complementares:\n"
-    
-    # Estado mais Inadimplente
-    estado_inadimplencia = df.groupby('uf')['carteira_inadimplida_arrastada'].agg(['sum', 'mean']).sort_values('sum', ascending=False)
-    top_estado_inadimplente = estado_inadimplencia.head(3)
-    insights += "Estados com Maior Inadimplência:\n"
-    for estado, dados in top_estado_inadimplente.iterrows():
-        percentual = (dados['sum'] / df['carteira_inadimplida_arrastada'].sum()) * 100
-        insights += f"- {estado}: R$ {dados['sum']:,.2f} ({percentual:.2f}% da inadimplência total), Média por registro: R$ {dados['mean']:,.2f}\n"
-    
-    # Análise de Concentração de Inadimplência
-    insights += "\nConcentração de Inadimplência:\n"
-    # Top 5 clientes com maior inadimplência
-    top_clientes_inadimplentes = df.groupby('cliente')['carteira_inadimplida_arrastada'].sum().nlargest(5)
-    insights += "Top 5 Clientes com Maior Inadimplência:\n"
-    for cliente, valor in top_clientes_inadimplentes.items():
-        percentual = (valor / df['carteira_inadimplida_arrastada'].sum()) * 100
-        insights += f"- {cliente}: R$ {valor:,.2f} ({percentual:.2f}% da inadimplência total)\n"
-    
-    # Análise de Distribuição de Operações
-    insights += "\nDistribuição de Operações:\n"
-    operacoes_por_cliente = df.groupby('cliente')['numero_de_operacoes'].agg(['mean', 'sum', 'max'])
-    insights += f"Média de Operações por Cliente: {operacoes_por_cliente['mean'].mean():.2f}\n"
-    insights += f"Total de Operações: {operacoes_por_cliente['sum'].sum():,.0f}\n"
-    
-    # Análise de Ativos Problemáticos
-    insights += "\nAtivos Problemáticos:\n"
-    ativos_por_porte = df.groupby('porte')['ativo_problematico'].agg(['sum', 'mean'])
-    for porte, dados in ativos_por_porte.iterrows():
-        insights += f"- {porte}: Total R$ {dados['sum']:,.2f}, Média R$ {dados['mean']:,.2f}\n"
-    
-    # Análise de Carteira Ativa vs Inadimplida
-    df['percentual_inadimplencia'] = df['carteira_inadimplida_arrastada'] / df['carteira_ativa'] * 100
-    percentual_inadimplencia_por_modalidade = df.groupby('modalidade')['percentual_inadimplencia'].mean().sort_values(ascending=False)
-    insights += "\nPercentual de Inadimplência por Modalidade:\n"
-    for modalidade, percentual in percentual_inadimplencia_por_modalidade.head(5).items():
-        insights += f"- {modalidade}: {percentual:.2f}%\n"
-    
-    # Análise de Ocupações com Maior Risco
-    ocupacoes_risco = df[df['tipo_cliente'] == 'PF'].groupby('ocupacao').agg({
-        'carteira_inadimplida_arrastada': 'sum',
-        'percentual_inadimplencia': 'mean'
-    }).sort_values('carteira_inadimplida_arrastada', ascending=False)
-    insights += "\nOcupações de Maior Risco (Pessoa Física):\n"
-    for ocupacao, dados in ocupacoes_risco.head(5).iterrows():
-        insights += f"- {ocupacao}: Inadimplência R$ {dados['carteira_inadimplida_arrastada']:,.2f}, Percentual {dados['percentual_inadimplencia']:.2f}%\n"
-    
-    # Análise de Sazonalidade
-    # More robust date conversion with error handling
-    df['ano'] = pd.to_datetime(df['data_base'], format='%d/%m/%Y', errors='coerce').dt.year
-    sazonalidade_inadimplencia = df.groupby('ano')['carteira_inadimplida_arrastada'].sum()
-    insights += "\nSazonalidade da Inadimplência:\n"
-    for ano, valor in sazonalidade_inadimplencia.items():
-        insights += f"- {ano}: R$ {valor:,.2f}\n"
-    
-    # Conclusão Executiva
-    insights += "\n🔍 Conclusão Executiva:\n"
-    insights += "- Análise multidimensional revela padrões complexos de inadimplência\n"
-    insights += "- Recomenda-se estratificação de risco por múltiplos fatores\n"
-    insights += "- Monitoramento contínuo e modelagem preditiva são cruciais\n"
-    
-    return insights
+# Função para obter colunas da tabela
+def get_table_columns(conn, table):
+    try:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT TOP 1 * FROM {table}")
+        columns = [desc[0] for desc in cursor.description]
+        cursor.close()
+        return columns
+    except pyodbc.Error as e:
+        st.error(f"Erro ao obter colunas da tabela: {str(e)}")
+        return []
 
 def main():
     st.title("💬 Chatbot Inadimplinha")
     st.caption("🚀 Chatbot Inadimplinha desenvolvido por Grupo de Inadimplência EY")
     
-    df = load_data()
-    base_insights = generate_base_insights(df)
- 
-    if 'messages' not in st.session_state:
-        st.session_state.messages = [
-            SystemMessage(content=f"Você é um especialista no setor bancário especializado em análise de inadimplência no Brasil. Aqui estão os dados a serem consultados:\n{base_insights}"),
-            AIMessage(content="Como posso te ajudar hoje?")
-        ]
+    conn, table = connect_to_db()
+    if conn is None:
+        st.stop()
     
-   
-    for message in st.session_state.messages[1:]:
-        with st.chat_message(message.type.lower()):
-            st.markdown(message.content)
+    available_columns = get_table_columns(conn, table)
+    if not available_columns:
+        st.error("Não foi possível recuperar as colunas da tabela 'inad_consolidado'.")
+        conn.close()
+        st.stop()
     
-  
+    llm = get_llm_client()
+
+    # Definir o template de prompt
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", (
+            "Você é um especialista em análise de inadimplência no Brasil. "
+            "Responda a pergunta do usuário com base nos dados da tabela '{table}' "
+            "sem passar detalhes técnicos e informações sobre as tabelas que estão sendo usadas. "
+            "Sempre forneça valores totais reais (em reais, R$) calculados a partir dos dados, "
+            "Não forneça detalhes como nome das colunas ou como deveria ser feita a consulta sql, "
+            "Insira informações adicionais relevantes sobre o tema quando apropriado. "
+            "As colunas disponíveis são: {available_columns}. "
+        )),
+        ("human", "{input}")
+    ])
+
+
+    # Criar a cadeia de execução
+    chain = prompt_template | llm
+
+    # Inicializar o histórico de mensagens
+    if "chat_history_store" not in st.session_state:
+        st.session_state.chat_history_store = InMemoryChatMessageHistory()
+
+    # Envolver a cadeia com histórico de mensagens
+    conversation = RunnableWithMessageHistory(
+        runnable=chain,
+        get_session_history=lambda: st.session_state.chat_history_store,
+        input_messages_key="input",
+        history_messages_key="chat_history"
+    )
+    
+    # Adicionar mensagem inicial apenas uma vez
+    if not st.session_state.app_initialized and not st.session_state.chat_history:
+        initial_message = "Como posso te ajudar hoje?"
+        st.session_state.chat_history.append({"role": "assistant", "content": initial_message})
+        st.session_state.chat_history_store.add_ai_message(initial_message)
+        st.session_state.app_initialized = True
+    
+    # Exibir histórico de chat para o usuário
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    
     if prompt := st.chat_input("Faça uma pergunta sobre a inadimplência"):
-        llm = get_llm_client()
-        
-       
-        st.session_state.messages.append(HumanMessage(content=prompt))
-        
+        # Adicionar a pergunta do usuário à interface de chat
         with st.chat_message("user"):
             st.markdown(prompt)
-         
+        
+        # Adicionar à exibição do histórico
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
+        
+        # Processar a resposta
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
-            full_response = ""
             
             try:
-           
-                messages = st.session_state.messages
-             
-                for chunk in llm.stream(messages):
-                    full_response += chunk.content
-                    message_placeholder.markdown(full_response + "▌")
+                with st.spinner(""):
+                    # Executar a consulta com contexto
+                    response = conversation.invoke(
+                        {"input": prompt, "table": table, "available_columns": available_columns},
+                        config={"configurable": {"session_id": "default"}}
+                    )
+                    response_stream = response.content
+                    
+                    # Simulando streaming para melhor UX
+                    full_response = ""
+                    for i in range(len(response_stream)):
+                        full_response = response_stream[:i+1]
+                        message_placeholder.markdown(full_response + "▌")
+                        time.sleep(0.01)
+                    
+                    # Verificar se há uma consulta SQL na resposta
+                    sql_match = re.search(r"```sql\n(.*?)\n```", full_response, re.DOTALL)
+                    if sql_match:
+                        query = sql_match.group(1)
+                        # Corrigir a posição do TOP se necessário
+                        if "TOP" in query and "ORDER BY" in query and query.index("TOP") > query.index("ORDER BY"):
+                            top_match = re.search(r"TOP\s+(\d+)", query)
+                            top_number = top_match.group(1) if top_match else "1"
+                            query = re.sub(r"TOP\s+\d+\s*;", "", query)
+                            query = query.replace("SELECT", f"SELECT TOP {top_number}", 1)
+                        
+                        # Executar a consulta no banco
+                        df = pd.read_sql(query, conn)
+                        
+                        # Substituir SQL com os resultados formatados
+                        formatted_response = full_response.replace(sql_match.group(0), df.to_string(index=False))
+                        message_placeholder.markdown(formatted_response)
+                        final_response = formatted_response
+                    else:
+                        # Se não houver SQL, usar a resposta direta
+                        message_placeholder.markdown(full_response)
+                        final_response = full_response
+                    
+                    # Adicionar à exibição do histórico após a resposta estar completa
+                    st.session_state.chat_history.append({"role": "assistant", "content": final_response})
                 
-                message_placeholder.markdown(full_response)
-                
+            except pyodbc.Error as e:
+                error_message = f"Erro ao executar a consulta no banco: {str(e)}"
+                message_placeholder.markdown(error_message)
+                st.session_state.chat_history.append({"role": "assistant", "content": error_message})
+                st.session_state.chat_history_store.add_ai_message(error_message)
             except Exception as e:
-                full_response = f"Erro: {str(e)}"
-                message_placeholder.markdown(full_response)
-            
-        
-            st.session_state.messages.append(AIMessage(content=full_response))
-        
+                error_message = f"Erro no processamento: {str(e)}"
+                message_placeholder.markdown(error_message)
+                st.session_state.chat_history.append({"role": "assistant", "content": error_message})
+                st.session_state.chat_history_store.add_ai_message(error_message)
+
     # Sidebar
     with st.sidebar:
-        ey_logo = Image.open(r"C:\Users\AT154GY\OneDrive - EY\Desktop\IA Inadimplencia\EY_Logo.png")
+        ey_logo = Image.open(r"EY_Logo.png")
         ey_logo_resized = ey_logo.resize((100, 100))   
         st.sidebar.image(ey_logo_resized)
         st.sidebar.header("EY Academy | Inadimplência")
+
         st.sidebar.subheader("🔍 Sugestões de Análise")
-        st.sidebar.write("➡️ Quais são os principais estados com maior inadimplência?")
         st.sidebar.write("➡️ Qual estado com maior inadimplência e quais os valores devidos?")
+        st.sidebar.write("➡️ Qual cliente apresenta o maior número de operações?")
+        st.sidebar.write("➡️ Em qual modalidade existe maior inadimplência?")
         st.sidebar.write("➡️ Compare a inadimplência entre PF e PJ")
-        st.sidebar.write("➡️ Qual o perfil de inadimplência em São Paulo?")
+        st.sidebar.write("➡️ Qual ocupação entre PF possui maior inadimplência?")
+        st.sidebar.write("➡️ Qual o principal porte de cliente com inadimplência entre PF?")
+        st.sidebar.write("➡️ Qual seção CNAE possui a maior inadimplencia?")
+        st.sidebar.write("➡️ Qual estado tem o maior valor médio de operações a vencer em até 90 dias?")
+        
+        # Botão para limpar histórico de conversa
+        if st.button("Limpar Conversa"):
+            st.session_state.chat_history_store = InMemoryChatMessageHistory()
+            st.session_state.chat_history = []
+            st.session_state.app_initialized = False
+            st.rerun()
+   
+    conn.close()
 
 if __name__ == "__main__":
     main()
-  
+    
+ 
