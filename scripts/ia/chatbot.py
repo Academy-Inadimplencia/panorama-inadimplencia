@@ -1,8 +1,10 @@
-# V4 - transformando arquivo parquet para csv
+# V5 - Implementação do langchain
 import streamlit as st
-from openai import OpenAI
+from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage, SystemMessage, AIMessage
 import httpx
 import pandas as pd
+from PIL import Image
 import os
 from dotenv import load_dotenv
 
@@ -13,23 +15,20 @@ api_key = os.getenv("API_KEY")
 st.set_page_config(page_title="Análise de Inadimplência", page_icon="💼")
 
 @st.cache_resource
-def get_openai_client():
-    return OpenAI(
+def get_llm_client():
+    return ChatOpenAI(
         api_key=api_key,
-        base_url="https://api.deepseek.com", 
+        base_url="https://api.deepseek.com",
+        model="deepseek-chat",
         http_client=httpx.Client(verify=False)
     )
 
 @st.cache_data
 def load_data():
-    return pd.read_csv(
-        r"C:\Users\AT154GY\OneDrive - EY\Desktop\IA Inadimplencia\df_cons_agg.csv"
-    ) 
+    return pd.read_csv(r"df_cons_agg.csv")
 
 def generate_base_insights(df):
-    # print("Tipos de dados originais:")
-    # print(df.dtypes)
-
+ 
     numeric_columns = [
         'carteira_inadimplida_arrastada', 
         'carteira_ativa', 
@@ -39,20 +38,12 @@ def generate_base_insights(df):
     ]
 
     for col in numeric_columns:
-        # Tente múltiplas estratégias de conversão
         df[col] = pd.to_numeric(
             df[col].astype(str).str.replace(',', '.').str.replace('R$', '').str.replace(' ', ''), 
             errors='coerce'
         ).fillna(0)
 
-    # Adicione verificação de valores após conversão
-    # print("\nValores após conversão:")
-    # for col in numeric_columns:
-    #     print(f"{col} - Soma: {df[col].sum()}, Tipo: {df[col].dtype}")
-
-
-    # Preparar dados
-    df['regiao'] = df['uf'].map({
+     df['regiao'] = df['uf'].map({
         'AC': 'Norte', 'AM': 'Norte', 'AP': 'Norte', 'PA': 'Norte', 'RO': 'Norte', 'RR': 'Norte', 'TO': 'Norte',
         'AL': 'Nordeste', 'BA': 'Nordeste', 'CE': 'Nordeste', 'MA': 'Nordeste', 'PB': 'Nordeste', 'PE': 'Nordeste', 'PI': 'Nordeste', 'RN': 'Nordeste', 'SE': 'Nordeste',
         'GO': 'Centro-Oeste', 'MT': 'Centro-Oeste', 'MS': 'Centro-Oeste', 'DF': 'Centro-Oeste',
@@ -221,62 +212,61 @@ def main():
     
     df = load_data()
     base_insights = generate_base_insights(df)
+ 
     if 'messages' not in st.session_state:
         st.session_state.messages = [
-            {"role": "system", "content": f"Você é um especialista no setor bancário especializado em análise de inadimplência no Brasil. Aqui estão os dados a serem consultados:\n{base_insights}"},
-            {"role": "assistant", "content": "Como posso te ajudar hoje?"}
+            SystemMessage(content=f"Você é um especialista no setor bancário especializado em análise de inadimplência no Brasil. Aqui estão os dados a serem consultados:\n{base_insights}"),
+            AIMessage(content="Como posso te ajudar hoje?")
         ]
     
-    for message in st.session_state.messages[1:]:   
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+   
+    for message in st.session_state.messages[1:]:
+        with st.chat_message(message.type.lower()):
+            st.markdown(message.content)
     
-    if prompt := st.chat_input("Faça uma pergunta sobre a inadimplência"):
-        client = get_openai_client()
-        api_key = client.api_key
-        if not api_key:
-            st.info("Por favor, adicione sua chave de API para continuar.")
-            st.stop()
   
-        st.session_state.messages.append({"role": "user", "content": prompt})
+    if prompt := st.chat_input("Faça uma pergunta sobre a inadimplência"):
+        llm = get_llm_client()
+        
+       
+        st.session_state.messages.append(HumanMessage(content=prompt))
         
         with st.chat_message("user"):
             st.markdown(prompt)
          
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
-            full_response = ""  
+            full_response = ""
             
             try:
-                response = client.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=st.session_state.messages,
-                    stream=True   
-                )
-        
-                for chunk in response:
-                    if chunk.choices[0].delta.content is not None:
-                        full_response += chunk.choices[0].delta.content
-                        message_placeholder.markdown(full_response + "▌")
-
+           
+                messages = st.session_state.messages
+             
+                for chunk in llm.stream(messages):
+                    full_response += chunk.content
+                    message_placeholder.markdown(full_response + "▌")
+                
                 message_placeholder.markdown(full_response)
-
+                
             except Exception as e:
                 full_response = f"Erro: {str(e)}"
                 message_placeholder.markdown(full_response)
             
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
         
+            st.session_state.messages.append(AIMessage(content=full_response))
+        
+    # Sidebar
     with st.sidebar:
-        
+        ey_logo = Image.open(r"C:\Users\AT154GY\OneDrive - EY\Desktop\IA Inadimplencia\EY_Logo.png")
+        ey_logo_resized = ey_logo.resize((100, 100))   
+        st.sidebar.image(ey_logo_resized)
         st.sidebar.header("EY Academy | Inadimplência")
         st.sidebar.subheader("🔍 Sugestões de Análise")
-
-        st.sidebar.write("Quais são os principais estados com maior inadimplência?")
-        st.sidebar.write("Qual estado com maior inadimplência e quais os valores devidos?")
-        st.sidebar.write("Compare a inadimplência entre PFe PJ")
-        st.sidebar.write("Qual o perfil de inadimplência em São Paulo?")
-         
+        st.sidebar.write("➡️ Quais são os principais estados com maior inadimplência?")
+        st.sidebar.write("➡️ Qual estado com maior inadimplência e quais os valores devidos?")
+        st.sidebar.write("➡️ Compare a inadimplência entre PF e PJ")
+        st.sidebar.write("➡️ Qual o perfil de inadimplência em São Paulo?")
 
 if __name__ == "__main__":
     main()
+  
