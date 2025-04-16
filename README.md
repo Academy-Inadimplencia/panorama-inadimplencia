@@ -17,7 +17,6 @@ Para a realização deste projeto, utilizaremos as seguintes tecnologias e ferra
 
 - **Jupyter Notebook** 🖥️: Para a análise e manipulação de dados.
 - **Git e GitHub** 📂: Para versionamento e colaboração no código.
-- **pySpark** 🔥: Para processamento de grandes volumes de dados.
 - **Pandas** 🐼: Para manipulação e análise de dados.
 - **Power BI** 📊: Para visualização de dados e criação de dashboards.
 - **draw.io** 📐: Para criação de diagramas e fluxos de trabalho.
